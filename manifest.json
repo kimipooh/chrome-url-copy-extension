@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "URLデコードコピー (C-Button版)",
-  "version": "1.8",
+  "version": "1.9",
   "author": "Kimiya Kitani",
   "description": "不要なパラメーターを除去し、タイトルとデコード済みURLをコピーします",
   "permissions": [
