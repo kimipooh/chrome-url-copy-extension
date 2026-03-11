@@ -54,6 +54,11 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
  * @param {string|null} targetLang - 強制取得する言語コード ('en', 'ja', または null)
  */
 function executeCopy(tab, targetLang) {
+  // Check if the tab URL is restricted
+  if (!tab.url || tab.url.startsWith("chrome://") || tab.url.startsWith("https://chrome.google.com/webstore")) {
+    console.warn("Cannot access restricted URL:", tab.url);
+    return;
+  }
   chrome.scripting.executeScript({
     target: { tabId: tab.id },
     func: mainProcessInPage,
