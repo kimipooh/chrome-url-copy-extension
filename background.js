@@ -1,21 +1,14 @@
-/**
- * グローバル変数・定数
- */
-// Googleサポート用：英語版タイトル取得メニューID
 const MENU_ID_EN = "copy-google-en";
-// Googleサポート用：日本語版タイトル取得メニューID
 const MENU_ID_JA = "copy-google-ja";
-// 通常コピー（現在の表示内容を優先）メニューID
 const MENU_ID_STD = "copy-standard";
 
-// インストール時にコンテキストメニューを作成
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({
     id: MENU_ID_EN,
     title: "タイトル(英)とURLをコピー",
     contexts: ["all"]
   });
-  
+
   chrome.contextMenus.create({
     id: MENU_ID_JA,
     title: "タイトル(日)とURLをコピー",
@@ -32,12 +25,10 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.action.setBadgeBackgroundColor({ color: "#111111" });
 });
 
-// アイコンクリック時は「通常コピー」を実行
 chrome.action.onClicked.addListener((tab) => {
   executeCopy(tab, null);
 });
 
-// メニュークリック時の処理分岐
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId === MENU_ID_EN) {
     executeCopy(tab, "en");
@@ -48,18 +39,13 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   }
 });
 
-/**
- * ページ内スクリプトの実行
- * @param {chrome.tabs.Tab} tab - 対象のタブ
- * @param {string|null} targetLang - 強制取得する言語コード ('en', 'ja', または null)
- */
-function executeCopy(tab, targetLang) {
-  // Check if the tab URL is restricted
+async function executeCopy(tab, targetLang) {
   if (!tab.url || tab.url.startsWith("chrome://") || tab.url.startsWith("https://chrome.google.com/webstore")) {
     console.warn("Cannot access restricted URL:", tab.url);
     return;
   }
-  chrome.scripting.executeScript({
+
+  await chrome.scripting.executeScript({
     target: { tabId: tab.id },
     func: mainProcessInPage,
     args: [targetLang]
@@ -67,8 +53,9 @@ function executeCopy(tab, targetLang) {
 }
 
 /**
- * ページ内で実行されるメイン処理
- * @param {string|null} targetLang - ターゲット言語
+ * ページ内で実行される関数。URL取得・タイトル取得・クリップボードコピーをすべてページコンテキストで行う。
+ * chrome.* APIは使用不可。
+ * @param {string|null} targetLang
  */
 async function mainProcessInPage(targetLang) {
   // --- 1. URLの取得とクリーンアップ ---
@@ -77,17 +64,19 @@ async function mainProcessInPage(targetLang) {
 
   try {
     const urlObj = new URL(rawUrl);
-    // 不要なパラメーターを削除
-    urlObj.searchParams.delete("uule");
-    // URL出力時は言語パラメーター(hl)も削除
-    urlObj.searchParams.delete("hl");
-    
-    cleanUrl = urlObj.toString().replace(/\?$/, "");
+    if (urlObj.hostname === "support.google.com" && !urlObj.pathname.startsWith("/s/community/")) {
+      // support.google.com（コミュニティ以外）: ? 以降を全削除
+      cleanUrl = urlObj.origin + urlObj.pathname;
+    } else {
+      // その他: uule と hl のみ削除
+      urlObj.searchParams.delete("uule");
+      urlObj.searchParams.delete("hl");
+      cleanUrl = urlObj.toString().replace(/\?$/, "");
+    }
   } catch (e) {
     cleanUrl = rawUrl;
   }
 
-  // URLのデコード
   let decodeURL = "";
   try {
     decodeURL = decodeURIComponent(cleanUrl);
@@ -98,18 +87,14 @@ async function mainProcessInPage(targetLang) {
   // --- 2. タイトルの取得 ---
   let title = "";
   const currentUrl = window.location.href;
-  
-  // Googleサポートページで言語が指定されている場合（英/日）
+
   if (targetLang && currentUrl.includes("support.google.com")) {
     try {
       const fetchUrl = new URL(currentUrl);
       fetchUrl.searchParams.set("hl", targetLang);
-      
       const response = await fetch(fetchUrl.toString());
       const html = await response.text();
       const doc = new DOMParser().parseFromString(html, "text/html");
-      
-      // Googleヘルプのタイトルは通常 h1
       const remoteTitle = doc.querySelector("h1")?.innerText || doc.title;
       if (remoteTitle) title = remoteTitle;
     } catch (e) {
@@ -117,39 +102,37 @@ async function mainProcessInPage(targetLang) {
     }
   }
 
-  // 既存の個別サイト用タイトル取得ロジック（通常モード、または上記で取得できなかった場合）
   if (!title) {
     if (currentUrl.includes("faq2.epson.jp")) {
       const epsonTitle = document.querySelector(".faq_qstCont_ttl, #QuestionDescription, dt.question");
       if (epsonTitle) title = epsonTitle.innerText;
-    } else if (/https:\/\/news\.yahoo\.co\.jp\/*/.test(currentUrl)) {
+    } else if (/https:\/\/news\.yahoo\.co\.jp\//.test(currentUrl)) {
       title = document.querySelector("article > header > h1")?.innerText;
-    } else if (/https:\/\/eset-support\.canon-its\.jp\/*/.test(currentUrl)) {
+    } else if (/https:\/\/eset-support\.canon-its\.jp\//.test(currentUrl)) {
       title = document.querySelector("h2.faq_qstCont_ttl > span.icoQ")?.innerText;
-    } else if (/(https:\/\/kitaney-google\.blogspot\.com\/*|https:\/\/kitaney-wordpress\.blogspot\.com\/*)/.test(currentUrl)) {
+    } else if (/(https:\/\/kitaney-google\.blogspot\.com\/|https:\/\/kitaney-wordpress\.blogspot\.com\/)/.test(currentUrl)) {
       title = document.querySelector("h3")?.innerText;
     }
   }
 
-  // 標準のタイトル（フォールバック）
   if (!title || title.trim() === "よくある質問(FAQ)｜エプソン") {
     title = document.title;
   }
 
-  // 改行と余計な空白を掃除
   title = title.replace(/\r?\n/g, "").replace(/\s+/g, " ").trim();
-  const textToCopy = `${title}\n${decodeURL}`;
+  const text = `${title}\n${decodeURL}`;
 
-  // --- 3. コピー処理 ---
+  // --- 3. クリップボードへコピー ---
   try {
-    await navigator.clipboard.writeText(textToCopy);
-    console.log("Copied:", textToCopy);
-  } catch (err) {
-    const n = document.createElement("textarea");
-    n.value = textToCopy;
-    document.body.appendChild(n);
-    n.select();
+    await navigator.clipboard.writeText(text);
+  } catch (e) {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
     document.execCommand("copy");
-    document.body.removeChild(n);
+    document.body.removeChild(ta);
   }
 }

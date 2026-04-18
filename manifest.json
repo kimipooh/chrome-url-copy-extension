@@ -1,13 +1,14 @@
 {
   "manifest_version": 3,
   "name": "URLデコードコピー (C-Button版)",
-  "version": "1.91",
+  "version": "1.93",
   "author": "Kimiya Kitani",
   "description": "不要なパラメーターを除去し、タイトルとデコード済みURLをコピーします",
   "permissions": [
     "contextMenus",
     "activeTab",
-    "scripting"
+    "scripting",
+    "offscreen"
   ],
   "action": {
     "default_title": "タイトルとデコード済みURLをコピー"
