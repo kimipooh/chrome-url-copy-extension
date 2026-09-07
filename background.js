@@ -3,26 +3,28 @@ const MENU_ID_JA = "copy-google-ja";
 const MENU_ID_STD = "copy-standard";
 
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({
-    id: MENU_ID_EN,
-    title: "タイトル(英)とURLをコピー",
-    contexts: ["all"]
-  });
+  chrome.contextMenus.removeAll(() => {
+    chrome.contextMenus.create({
+      id: MENU_ID_EN,
+      title: "タイトル(英)とURLをコピー",
+      contexts: ["all"]
+    });
 
-  chrome.contextMenus.create({
-    id: MENU_ID_JA,
-    title: "タイトル(日)とURLをコピー",
-    contexts: ["all"]
-  });
+    chrome.contextMenus.create({
+      id: MENU_ID_JA,
+      title: "タイトル(日)とURLをコピー",
+      contexts: ["all"]
+    });
 
-  chrome.contextMenus.create({
-    id: MENU_ID_STD,
-    title: "タイトルとURLをコピー (通常)",
-    contexts: ["all"]
-  });
+    chrome.contextMenus.create({
+      id: MENU_ID_STD,
+      title: "タイトルとURLをコピー (通常)",
+      contexts: ["all"]
+    });
 
-  chrome.action.setBadgeText({ text: "C" });
-  chrome.action.setBadgeBackgroundColor({ color: "#111111" });
+    chrome.action.setBadgeText({ text: "C" });
+    chrome.action.setBadgeBackgroundColor({ color: "#111111" });
+  });
 });
 
 chrome.action.onClicked.addListener((tab) => {
