@@ -15,16 +15,19 @@ Chrome拡張機能（Manifest V3）。現在のタブのタイトルとデコー
 
 ## Architecture
 
-すべての処理は `background.js` のサービスワーカーで完結する。`chrome.scripting.executeScript` で `mainProcessInPage` 関数をページ内に注入し、ページのコンテキストで実行させる方式。
+サービスワーカーがページ内の文字列生成、Offscreen Documentでのコピー、結果表示を制御する。Chrome 116以降の `runtime.getContexts` を利用する。
 
 **実行フロー:**
 ```
 アイコンクリック or 右クリックメニュー
   └─ executeCopy(tab, targetLang)
-       └─ chrome.scripting.executeScript → mainProcessInPage(targetLang)
-            ├─ 1. URL取得・クリーンアップ（下記ルール → decodeURIComponent）
-            ├─ 2. タイトル取得（サイト別セレクタ → document.title フォールバック）
-            └─ 3. コピー（Clipboard API → textarea+execCommand フォールバック）
+       ├─ 既定表示へ復元・制限URL判定・要求ID更新
+       ├─ chrome.scripting.executeScript → mainProcessInPage(targetLang)
+       │    ├─ URL取得・クリーンアップ・decodeURIComponent
+       │    └─ サイト別タイトル取得 → { text } を返す
+       ├─ ensureOffscreenDocument → 既存再利用 or 作成完了待ち
+       └─ offscreen.js → 最新要求確認 → textarea + execCommand → 成否応答
+            └─ 成功応答後のみOK、失敗は!とツールチップ（4秒後に復元）
 ```
 
 **URLクリーンアップルール:**
@@ -42,8 +45,13 @@ Chrome拡張機能（Manifest V3）。現在のタブのタイトルとデコー
 ## Key Constraints
 
 - `mainProcessInPage` はページのコンテキストで動くため、Chrome拡張のAPIは一切使えない（`chrome.*` 不可）
-- `offscreen.html/js` はファイルとして存在するが未使用（manifest未登録・background.jsから未参照）
-- `chrome://` および Chrome Web Store URLはスクリプト注入をガードして早期リターン
+- `offscreen` / `clipboardWrite` 権限を維持し、書き込みは `offscreen.html/js` のみで行う。textareaは必ず削除する。
+- Offscreen作成Promiseを共有し、失敗時にリセット。既存確認はSW再起動後も `runtime.getContexts` で行う。
+- 要求IDはSWごとの連番ではなくUUIDとし、古い要求の書き込み・表示を破棄。Offscreen側も書き込み直前にSWへ最新要求か確認する。
+- クリップボードが全体共有のためバッジも全体表示。表示APIは直列化し、SW停止でタイマーを失っても次回開始時に既定表示へ戻す。
+- 内部ページ、新旧Chrome Web Store、不明URLは注入せず失敗表示。注入失敗（file権限なし等）も捕捉する。
+- Google Supportの言語指定取得はAbortControllerで5秒のタイムアウト、HTTP成否確認、h1のtextContent取得を行い、失敗時は既存タイトル抽出へ戻る。
+- テストは `node --test tests/`（chrome APIとDOMのモック）。実ブラウザーのクリップボード書き込み検証とは区別する。
 
 ## Site-specific Title Selectors
 
@@ -55,4 +63,4 @@ Chrome拡張機能（Manifest V3）。現在のタブのタイトルとデコー
 | Yahoo!ニュース | `article > header > h1` |
 | ESET サポート | `h2.faq_qstCont_ttl > span.icoQ` |
 | Blogspot (kitaney) | `h3` |
-| Google Support | `hl` パラメータ付きfetchで `h1` or `doc.title` |
+| Google Support | `hl` パラメータ付きfetchで `h1.textContent` or `doc.title` |

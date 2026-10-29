@@ -41,21 +41,118 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   }
 });
 
-async function executeCopy(tab, targetLang) {
-  if (!tab.url || tab.url.startsWith("chrome://") || tab.url.startsWith("https://chrome.google.com/webstore")) {
-    console.warn("Cannot access restricted URL:", tab.url);
-    return;
-  }
+// クリップボードと表示は拡張全体で共有し、最後に開始した要求だけを採用する。
+let latestRequestId;
+let creatingOffscreen;
+let feedbackTimer;
+let feedbackQueue = Promise.resolve();
+const DEFAULT_TITLE = chrome.runtime.getManifest().action.default_title;
 
-  await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    func: mainProcessInPage,
-    args: [targetLang]
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request?.target === "background" && request.type === "is-current-copy") {
+    sendResponse({ current: request.requestId === latestRequestId });
+  }
+});
+
+function updateFeedback(requestId, text = "C", color = "#111111", title = DEFAULT_TITLE) {
+  // 非同期APIの完了順も直列化し、古い表示が新しい表示を上書きしないようにする。
+  const update = feedbackQueue.then(async () => {
+    if (requestId !== latestRequestId) return;
+    await chrome.action.setBadgeText({ text });
+    await chrome.action.setBadgeBackgroundColor({ color });
+    await chrome.action.setTitle({ title });
   });
+  feedbackQueue = update.catch(() => {});
+  return update;
+}
+
+async function ensureOffscreenDocument() {
+  if (!creatingOffscreen) {
+    creatingOffscreen = (async () => {
+      const filter = {
+        contextTypes: ["OFFSCREEN_DOCUMENT"],
+        documentUrls: [chrome.runtime.getURL("offscreen.html")]
+      };
+      if ((await chrome.runtime.getContexts(filter)).length) return;
+      try {
+        await chrome.offscreen.createDocument({
+          url: "offscreen.html",
+          reasons: [chrome.offscreen.Reason.CLIPBOARD],
+          justification: "タイトルとURLをクリップボードにコピーするため"
+        });
+      } catch (error) {
+        // 他の作成処理と競合した場合も、実際の存在を再確認する。
+        if (!(await chrome.runtime.getContexts(filter)).length) throw error;
+      }
+    })();
+  }
+  try {
+    await creatingOffscreen;
+  } finally {
+    creatingOffscreen = undefined;
+  }
+}
+
+function restrictedReason(tab) {
+  if (!tab || !Number.isInteger(tab.id) || !tab.url) return "タブのURLが不明です";
+  try {
+    const url = new URL(tab.url);
+    if (!["https:", "http:", "file:"].includes(url.protocol) ||
+        url.hostname === "chromewebstore.google.com" ||
+        (url.hostname === "chrome.google.com" && /^\/webstore(?:\/|$)/.test(url.pathname))) {
+      return "このページでは拡張機能によるコピーを実行できません";
+    }
+  } catch {
+    return "タブのURLが不正です";
+  }
+}
+
+async function executeCopy(tab, targetLang) {
+  const requestId = crypto.randomUUID();
+  latestRequestId = requestId;
+  clearTimeout(feedbackTimer);
+  try {
+    // SW停止で復元タイマーが失われた場合も、次回開始時には既定表示に戻す。
+    await updateFeedback(requestId);
+    const reason = restrictedReason(tab);
+    if (reason) throw new Error(reason);
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: mainProcessInPage,
+      args: [targetLang]
+    });
+    if (requestId !== latestRequestId) return;
+    const text = results?.[0]?.result?.text;
+    if (typeof text !== "string" || !text.trim()) throw new Error("ページからコピー文字列を取得できませんでした");
+    await ensureOffscreenDocument();
+    if (requestId !== latestRequestId) return;
+    const response = await chrome.runtime.sendMessage({
+      target: "offscreen", type: "copy-data", text, requestId
+    });
+    if (requestId !== latestRequestId) return;
+    if (response?.discarded) return;
+    if (response?.success !== true) throw new Error(response?.error || "コピーの成功応答がありません");
+    await updateFeedback(requestId, "OK", "#137333", "コピーしました");
+  } catch (error) {
+    if (requestId !== latestRequestId) return;
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error("コピーに失敗しました:", detail);
+    try {
+      await updateFeedback(requestId, "!", "#B3261E", `コピー失敗: ${detail}`);
+    } catch (displayError) {
+      console.error("コピー結果の表示に失敗しました:", displayError);
+    }
+  } finally {
+    if (requestId === latestRequestId) {
+      feedbackTimer = setTimeout(() => {
+        updateFeedback(requestId).catch(error => console.error("表示の復元に失敗しました:", error));
+      }, 4000);
+    }
+  }
 }
 
 /**
- * ページ内で実行される関数。URL取得・タイトル取得・クリップボードコピーをすべてページコンテキストで行う。
+ * ページ内で実行される関数。URL取得・タイトル取得と文字列生成をページコンテキストで行う。
  * chrome.* APIは使用不可。
  * @param {string|null} targetLang
  */
@@ -90,17 +187,22 @@ async function mainProcessInPage(targetLang) {
   let title = "";
   const currentUrl = window.location.href;
 
-  if (targetLang && currentUrl.includes("support.google.com")) {
+  if (targetLang && new URL(currentUrl).hostname === "support.google.com") {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
     try {
       const fetchUrl = new URL(currentUrl);
       fetchUrl.searchParams.set("hl", targetLang);
-      const response = await fetch(fetchUrl.toString());
+      const response = await fetch(fetchUrl.toString(), { signal: controller.signal });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const html = await response.text();
       const doc = new DOMParser().parseFromString(html, "text/html");
-      const remoteTitle = doc.querySelector("h1")?.innerText || doc.title;
+      const remoteTitle = doc.querySelector("h1")?.textContent || doc.title;
       if (remoteTitle) title = remoteTitle;
     } catch (e) {
       console.warn(`${targetLang} 版タイトルの取得に失敗しました。`);
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -124,17 +226,5 @@ async function mainProcessInPage(targetLang) {
   title = title.replace(/\r?\n/g, "").replace(/\s+/g, " ").trim();
   const text = `${title}\n${decodeURL}`;
 
-  // --- 3. クリップボードへコピー ---
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch (e) {
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.style.position = "fixed";
-    ta.style.opacity = "0";
-    document.body.appendChild(ta);
-    ta.select();
-    document.execCommand("copy");
-    document.body.removeChild(ta);
-  }
+  return { text };
 }
